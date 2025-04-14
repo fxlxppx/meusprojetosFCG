@@ -52,6 +52,8 @@ set(EXERCISES
     Hello2Triangles
     HelloTexture
     Lista1/Ex6
+    Lista1/Ex7
+    Lista1/Ex8
     Lista1/Ex9
 )
 
