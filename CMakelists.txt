@@ -51,13 +51,8 @@ set(EXERCISES
     HelloTransform
     Hello2Triangles
     HelloTexture
+    HelloSprite
     Lista1/Ex6
-    Lista1/Ex7
-    Lista1/Ex7B
-    Lista1/Ex7C
-    Lista1/Ex7D
-    Lista1/Ex7E
-    Lista1/Ex8
     Lista1/Ex9
 )
 
