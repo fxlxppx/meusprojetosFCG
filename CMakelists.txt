@@ -54,6 +54,7 @@ set(EXERCISES
     HelloSprite
     Lista1/Ex6
     Lista1/Ex9
+    Lista1/Ex10
 )
 
 add_compile_options(-Wno-pragmas)
