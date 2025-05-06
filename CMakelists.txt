@@ -52,6 +52,7 @@ set(EXERCISES
     Hello2Triangles
     HelloTexture
     HelloSprite
+    GrauA/Game
     Lista1/Ex6
     Lista1/Ex7
     Lista1/Ex7B
