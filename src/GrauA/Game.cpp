@@ -1,132 +1,267 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
 
-#include <vector>
 #include <iostream>
+#include <vector>
 #include <cstdlib>
 #include <ctime>
+#include <cmath>
 #include <algorithm>
+
+using namespace std;
+using namespace glm;
 
 const GLuint WIDTH = 800, HEIGHT = 600;
 
+struct Sprite {
+    GLuint VAO;
+    GLuint texID;
+    vec2 pos;
+    vec2 size;
+    float angle = 0.0f;
+    int nFrames = 1;
+    int nAnimations = 1;
+    int iFrame = 0;
+    int iAnimation = 0;
+    float ds = 1.0f, dt = 1.0f;
+};
+
 struct Rect {
-    glm::vec2 pos;   // centro
-    glm::vec2 size;
+    vec2 pos;
+    vec2 size;
 
     bool intersects(const Rect& other) {
-        return std::abs(pos.x - other.pos.x) < (size.x + other.size.x) / 2.0f &&
-               std::abs(pos.y - other.pos.y) < (size.y + other.size.y) / 2.0f;
+        return abs(pos.x - other.pos.x) < (size.x + other.size.x) / 2.0f &&
+               abs(pos.y - other.pos.y) < (size.y + other.size.y) / 2.0f;
     }
 };
 
-// Globals
-bool jump = false;
-float velocityY = 0.0f;
-bool isGameOver = false;
-std::vector<Rect> obstacles;
-float obstacleTimer = 0.0f;
-const float gravity = -9.8f;
-const float jumpForce = 5.0f;
+const char* vertexShaderSource = R"(
+#version 400
+layout (location = 0) in vec2 position;
+layout (location = 1) in vec2 texCoord;
 
-Rect player = { glm::vec2(-0.8f, -0.5f), glm::vec2(0.05f, 0.1f) };
+uniform mat4 projection;
+uniform mat4 model;
+out vec2 tex_coord;
 
-GLuint shaderID, colorLoc, vao;
+void main() {
+    tex_coord = texCoord;
+    gl_Position = projection * model * vec4(position, 0.0, 1.0);
+}
+)";
 
-void key_callback(GLFWwindow* window, int key, int, int action, int) {
-    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
-        glfwSetWindowShouldClose(window, true);
-    if (key == GLFW_KEY_SPACE && action == GLFW_PRESS && !isGameOver)
-        jump = true;
+const char* fragmentShaderSource = R"(
+#version 400
+in vec2 tex_coord;
+out vec4 color;
+uniform sampler2D tex_buff;
+uniform vec2 offset_tex;
+
+void main() {
+    color = texture(tex_buff, tex_coord + offset_tex);
+}
+)";
+
+GLuint compileShaders();
+GLuint setupSpriteVAO(float& ds, float& dt, int nFrames, int nAnimations);
+int loadTexture(string filePath);
+void drawSprite(GLuint shaderID, const Sprite& spr);
+
+void key_callback(GLFWwindow* window, int key, int, int action, int);
+bool keys[1024];
+
+GLuint compileShaders() {
+    GLint success;
+    GLchar infoLog[512];
+
+    GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
+    glCompileShader(vertexShader);
+    glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        glGetShaderInfoLog(vertexShader, 512, NULL, infoLog);
+        std::cerr << "Erro ao compilar Vertex Shader:\n" << infoLog << std::endl;
+    }
+
+    GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fragmentShader, 1, &fragmentShaderSource, NULL);
+    glCompileShader(fragmentShader);
+    glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        glGetShaderInfoLog(fragmentShader, 512, NULL, infoLog);
+        std::cerr << "Erro ao compilar Fragment Shader:\n" << infoLog << std::endl;
+    }
+
+    GLuint shaderProgram = glCreateProgram();
+    glAttachShader(shaderProgram, vertexShader);
+    glAttachShader(shaderProgram, fragmentShader);
+    glLinkProgram(shaderProgram);
+    glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
+    if (!success) {
+        glGetProgramInfoLog(shaderProgram, 512, NULL, infoLog);
+        std::cerr << "Erro ao linkar Shader Program:\n" << infoLog << std::endl;
+    }
+
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+
+    return shaderProgram;
 }
 
-GLuint setupShader() {
-    const char* vs = R"(
-        #version 400
-        layout (location = 0) in vec3 position;
-        uniform vec2 offset;
-        uniform vec2 scale;
-        void main() {
-            gl_Position = vec4((position.xy * scale) + offset, position.z, 1.0);
-        }
-    )";
+void drawSprite(GLuint shaderID, const Sprite& spr) {
+    glBindVertexArray(spr.VAO);
+    glBindTexture(GL_TEXTURE_2D, spr.texID);
 
-    const char* fs = R"(
-        #version 400
-        uniform vec4 inputColor;
-        out vec4 color;
-        void main() {
-            color = inputColor;
-        }
-    )";
+    mat4 model = mat4(1.0f);
+    model = translate(model, vec3(spr.pos, 0.0f));
+    model = rotate(model, radians(spr.angle), vec3(0.0f, 0.0f, 1.0f));
+    model = scale(model, vec3(spr.size, 1.0f));
 
-    GLuint vsID = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vsID, 1, &vs, NULL);
-    glCompileShader(vsID);
+    glUniformMatrix4fv(glGetUniformLocation(shaderID, "model"), 1, GL_FALSE, value_ptr(model));
+    glDrawArrays(GL_TRIANGLES, 0, 6);
 
-    GLuint fsID = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fsID, 1, &fs, NULL);
-    glCompileShader(fsID);
-
-    GLuint prog = glCreateProgram();
-    glAttachShader(prog, vsID);
-    glAttachShader(prog, fsID);
-    glLinkProgram(prog);
-
-    glDeleteShader(vsID);
-    glDeleteShader(fsID);
-    return prog;
+    glBindVertexArray(0);
 }
 
-GLuint setupGeometry() {
-    float vertices[] = {
-        -0.5f, -0.5f, 0.0f,
-         0.5f, -0.5f, 0.0f,
-         0.5f,  0.5f, 0.0f,
+GLuint setupSpriteVAO(float& ds, float& dt, int nFrames, int nAnimations) {
+    ds = 1.0f / nFrames;
+    dt = 1.0f / nAnimations;
 
-         0.5f,  0.5f, 0.0f,
-        -0.5f,  0.5f, 0.0f,
-        -0.5f, -0.5f, 0.0f
+    float vertices[] = {     
+        -0.5f,  0.5f, 0.0f, dt,
+        -0.5f, -0.5f, 0.0f, 0.0f,
+         0.5f,  0.5f, ds,   dt,
+        -0.5f, -0.5f, 0.0f, 0.0f,
+         0.5f, -0.5f, ds,   0.0f,
+         0.5f,  0.5f, ds,   dt
     };
 
-    GLuint vbo, vao;
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
+    GLuint VBO, VAO;
+    glGenVertexArrays(1, &VAO);
+    glGenBuffers(1, &VBO);
 
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-
+    glBindVertexArray(VAO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
 
-    return vao;
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    glBindVertexArray(0);
+    return VAO;
 }
 
-void drawRect(Rect rect, glm::vec4 color) {
-    glUniform4fv(colorLoc, 1, &color[0]);
-    glUniform2fv(glGetUniformLocation(shaderID, "offset"), 1, &rect.pos[0]);
-    glUniform2fv(glGetUniformLocation(shaderID, "scale"), 1, &rect.size[0]);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
+int loadTexture(string filePath)
+{
+	GLuint texID;
+
+	// Gera o identificador da textura na memória
+	glGenTextures(1, &texID);
+	glBindTexture(GL_TEXTURE_2D, texID);
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+	int width, height, nrChannels;
+
+	unsigned char *data = stbi_load(filePath.c_str(), &width, &height, &nrChannels, 0);
+
+	if (data)
+	{
+		if (nrChannels == 3) // jpg, bmp
+		{
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+		}
+		else // png
+		{
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+		}
+		glGenerateMipmap(GL_TEXTURE_2D);
+	}
+	else
+	{
+		std::cout << "Failed to load texture" << std::endl;
+	}
+
+	stbi_image_free(data);
+
+	glBindTexture(GL_TEXTURE_2D, 0);
+
+	return texID;
+}
+
+
+Sprite background, player;
+vector<Sprite> enemies;
+float gravity = -9.8f;
+float velocityY = 0.0f;
+bool isOnGround = true;
+bool jump = false;
+bool isGameOver = false;
+float lastFrameTime = 0.0f;
+float frameInterval = 1.0f / 12.0f;
+float obstacleTimer = 0.0f;
+
+void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
+        glfwSetWindowShouldClose(window, true);
+
+    if (key == GLFW_KEY_SPACE && action == GLFW_PRESS && !isGameOver)
+        jump = true;
 }
 
 int main() {
     srand((unsigned)time(0));
     glfwInit();
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    GLFWwindow* window = glfwCreateWindow(WIDTH, HEIGHT, "Endless Runner", NULL, NULL);
+    glfwWindowHint(GLFW_SAMPLES, 8);
+    stbi_set_flip_vertically_on_load(true);
+    GLFWwindow* window = glfwCreateWindow(WIDTH, HEIGHT, "Endless Runner", nullptr, nullptr);
     glfwMakeContextCurrent(window);
     glfwSetKeyCallback(window, key_callback);
     gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
 
-    shaderID = setupShader();
-    colorLoc = glGetUniformLocation(shaderID, "inputColor");
-    vao = setupGeometry();
+    GLuint shaderID = compileShaders();
     glUseProgram(shaderID);
 
+    mat4 projection = ortho(-1.0f, 1.0f, -0.75f, 0.75f, -1.0f, 1.0f);
+    glUniformMatrix4fv(glGetUniformLocation(shaderID, "projection"), 1, GL_FALSE, value_ptr(projection));
+    glUniform1i(glGetUniformLocation(shaderID, "tex_buff"), 0);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    background.texID = loadTexture("../assets/sprites/Background.png");
+    background.size = vec2(2.0f, 1.5f);
+    background.VAO = setupSpriteVAO(background.ds, background.dt, 1, 1);
+
+    player.texID = loadTexture("../assets/sprites/sprite_dino.png");
+    player.size = vec2(0.1f, 0.2f);
+    player.pos = vec2(-0.8f, -0.5f);
+    player.nFrames = 8;
+    player.nAnimations = 1;
+    player.VAO = setupSpriteVAO(player.ds, player.dt, player.nFrames, player.nAnimations);
+
+    Sprite baseEnemy;
+    baseEnemy.texID = loadTexture("../assets/sprites/slimer-idle.png");
+    baseEnemy.size = vec2(0.1f, 0.2f);
+    baseEnemy.nFrames = 8;
+    baseEnemy.nAnimations = 1;
+    baseEnemy.VAO = setupSpriteVAO(baseEnemy.ds, baseEnemy.dt, baseEnemy.nFrames, baseEnemy.nAnimations);
+
     float lastTime = glfwGetTime();
+    float nextObstacleTime = 1.0f;
 
     while (!glfwWindowShouldClose(window)) {
         float currentTime = glfwGetTime();
@@ -135,60 +270,68 @@ int main() {
 
         glfwPollEvents();
 
-        // Física do personagem
         if (!isGameOver) {
-            if (jump) {
-                velocityY = jumpForce;
+            if (jump && isOnGround) {
+                velocityY = 3.0f;
+                isOnGround = false;
                 jump = false;
             }
+
             velocityY += gravity * deltaTime;
             player.pos.y += velocityY * deltaTime;
 
             if (player.pos.y < -0.5f) {
                 player.pos.y = -0.5f;
                 velocityY = 0.0f;
+                isOnGround = true;
             }
 
-            // Obstáculos
             obstacleTimer += deltaTime;
-            if (obstacleTimer >= 1.5f) {
+            if (obstacleTimer >= nextObstacleTime) {
                 obstacleTimer = 0.0f;
-                Rect obs;
-                obs.size = glm::vec2(0.05f, 0.1f);
-                obs.pos = glm::vec2(1.2f, -0.5f);
-                obstacles.push_back(obs);
+                nextObstacleTime = 1.0f + static_cast<float>(rand()) / RAND_MAX * 1.5f;
+                Sprite newEnemy = baseEnemy;
+                newEnemy.pos = vec2(1.2f, -0.5f);
+                enemies.push_back(newEnemy);
             }
 
-            for (auto& obs : obstacles) {
-                obs.pos.x -= 1.0f * deltaTime;
+            for (auto& e : enemies) {
+                e.pos.x -= 1.0f * deltaTime;
             }
 
-            // Remove obstáculos fora da tela
-            obstacles.erase(std::remove_if(obstacles.begin(), obstacles.end(),
-                                           [](Rect& o) { return o.pos.x < -1.2f; }),
-                            obstacles.end());
+            enemies.erase(remove_if(enemies.begin(), enemies.end(), [](Sprite& e) {
+                return e.pos.x < -1.2f;
+            }), enemies.end());
 
-            // Checa colisão
-            for (const auto& obs : obstacles) {
-                if (player.intersects(obs)) {
+            for (const auto& e : enemies) {
+                Rect r1 = {player.pos, player.size};
+                Rect r2 = {e.pos, e.size};
+                if (r1.intersects(r2)) {
                     isGameOver = true;
-                    break;
                 }
+            }
+
+            float now = glfwGetTime();
+            if (now - lastFrameTime >= frameInterval) {
+                player.iFrame = (player.iFrame + 1) % player.nFrames;
+                for (auto& e : enemies)
+                    e.iFrame = (e.iFrame + 1) % e.nFrames;
+                lastFrameTime = now;
             }
         }
 
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        glBindVertexArray(vao);
+        glUniform2f(glGetUniformLocation(shaderID, "offset_tex"), 0.0f, 0.0f);
+        drawSprite(shaderID, background);
 
-        if (isGameOver)
-            drawRect(player, glm::vec4(1, 1, 0, 1)); // amarelo se morreu
-        else
-            drawRect(player, glm::vec4(0, 0, 1, 1)); // azul
+        glUniform2f(glGetUniformLocation(shaderID, "offset_tex"), player.iFrame * player.ds, player.iAnimation * player.dt);
+        drawSprite(shaderID, player);
 
-        for (const auto& obs : obstacles) {
-            drawRect(obs, glm::vec4(1, 0, 0, 1));
+        for (const auto& e : enemies) {
+            glUniform2f(glGetUniformLocation(shaderID, "offset_tex"), e.iFrame * e.ds, e.iAnimation * e.dt);
+            drawSprite(shaderID, e);
         }
 
         glfwSwapBuffers(window);
